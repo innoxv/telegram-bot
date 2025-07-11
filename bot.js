@@ -12,7 +12,7 @@ if (!process.env.TELEGRAM_BOT_TOKEN) {
 
 // Initialize bot and database pool
 const bot = new Telegraf(process.env.TELEGRAM_BOT_TOKEN); // Create Telegraf bot instance with token from .env
-bot.use(session()); // Enable in-memory session middleware to store user data (e.g., userId, customerName)
+bot.use(session()); // Enable in-memory session middleware to store user data (userId, customerName)
 
 const pool = mysql.createPool({ // Create MySQL connection pool for efficient database access
     user: process.env.DB_USER, // Database username from .env 
