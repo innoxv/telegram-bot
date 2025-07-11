@@ -133,7 +133,10 @@ const signInScene = new Scenes.WizardScene(
         try {
             const safeHash = hashedPassword.replace(/^\$2y\$/, '$2b$'); // Convert PHP bcrypt hash ($2y$) to node-bcrypt ($2b$)
             const isValid = await bcrypt.compare(password, safeHash); // Verify password against hash
-            
+
+            // Send warning to user to delete their password message
+            await ctx.reply('⚠️ For your privacy, please delete your password message from the chat history.');
+
             if (!isValid) { // Check if password is valid
                 await ctx.reply('Invalid password. Use /signin to try again.'); // Reply if password is incorrect
                 delete ctx.session.signInData; // Clear temporary data
@@ -152,15 +155,21 @@ const signInScene = new Scenes.WizardScene(
             ctx.session.customerName = customerRows[0].name; // Store customer name
             delete ctx.session.signInData; // Clear temporary sign-in data
 
-            await ctx.reply(`Welcome back, ${ctx.session.customerName}!`, { // Reply with welcome message and inline keyboard
+            // Escape username for MarkdownV2 - The markdown makes the username bold
+            // This is necessary to prevent formatting issues with special characters
+            // The regex escapes characters that have special meaning in MarkdownV2, including backslash and exclamation mark
+            const escapeMarkdownV2 = (text) => text.replace(/([_\*\[\]()~`>#+\-=|{}.!\\])/g, '\\$1');
+            const boldName = `*${escapeMarkdownV2(ctx.session.customerName)}*`;
+            await ctx.reply(`Welcome back, ${boldName}\\!`, {
+                parse_mode: 'MarkdownV2',
                 reply_markup: {
                     inline_keyboard: [
                         [
-                            { text: 'Check Loan', callback_data: 'checkloan' },
+                            { text: 'List Loans', callback_data: 'loans' },
                             { text: 'View Balance', callback_data: 'balance' }
                         ],
                         [
-                            { text: 'List Loans', callback_data: 'loans' },
+                            { text: 'Check Loan', callback_data: 'checkloan' },
                             { text: 'Help', callback_data: 'help' }
                         ]
                     ]
