@@ -25,6 +25,7 @@ const pool = mysql.createPool({ // Create MySQL connection pool for efficient da
     queueLimit: 0 // Allow unlimited queued connection requests
 });
 
+
 // Verify database connection to ensure the bot can access LMSDB
 pool.getConnection()
     .then(conn => conn.release()) // Acquire and release a connection to test connectivity
