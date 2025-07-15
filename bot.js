@@ -152,6 +152,16 @@ const signInScene = new Scenes.WizardScene(
         const password = ctx.message.text.trim(); // Get and trim password input
         const { email, userId, hashedPassword, role } = ctx.session?.signInData || {}; // Retrieve sign-in data
 
+        // Attempt to delete the user's password message for privacy
+        let passwordMessageDeleted = false;
+        try {
+            await ctx.deleteMessage(ctx.message.message_id);
+            passwordMessageDeleted = true;
+        } catch (e) {
+            // If deletion fails ( bot lacks permission), warn the user
+            await ctx.reply('⚠️ For your privacy, please delete your password message from the chat history.');
+        }
+
         if (!userId || !hashedPassword) { // Check if session data is present
             await ctx.reply('Session expired. Please start over.'); // Reply if session expired
             return ctx.scene.leave(); // Exit scene
@@ -162,7 +172,7 @@ const signInScene = new Scenes.WizardScene(
             const isValid = await bcrypt.compare(password, safeHash); // Verify password against hash
 
             // Send warning to user to delete their password message
-            await ctx.reply('⚠️ For your privacy, please delete your password message from the chat history.');
+            // (This is now handled only if deletion fails)
 
             if (!isValid) { // Check if password is valid
                 await ctx.reply('Invalid password. Use /signin to try again.'); // Reply if password is incorrect
@@ -227,11 +237,11 @@ const signInScene = new Scenes.WizardScene(
                 ]
             ] : [
                 [
-                    { text: 'Check Loan', callback_data: 'checkloan' },
+                    { text: 'List Loans', callback_data: 'loans' },
                     { text: 'View Balance', callback_data: 'balance' }
                 ],
                 [
-                    { text: 'List Loans', callback_data: 'loans' },
+                    { text: 'Check Loan', callback_data: 'checkloan' },
                     { text: 'Help', callback_data: 'help' }
                 ]
             ];
