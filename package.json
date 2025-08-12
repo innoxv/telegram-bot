@@ -11,7 +11,7 @@
   "description": "",
   "dependencies": {
     "telegraf": "^4.16.3",
-    "mysql2": "^3.11.0",
+    "pg": "^8.11.5",
     "dotenv": "^17.1.0",
     "bcrypt": "^5.1.1",
     "express": "^4.21.1"
