@@ -1,5 +1,6 @@
 // Import required modules for bot functionality, database interaction, password hashing, and environment variable management
-const { Telegraf, session, Scenes } = require('telegraf'); // Telegraf for bot framework, session for in-memory session management, Scenes for multi-step wizards
+const { Telegraf, session, Scenes } = require('telegraf');
+const express = require('express'); // Add Express for webhook handling
 const mysql = require('mysql2/promise'); // MySQL client with promise support for async database queries
 const bcrypt = require('bcrypt'); // Library for secure password hash verification
 require('dotenv').config(); // Loads environment variables from .env file
@@ -835,3 +836,32 @@ bot.launch().catch(err => { // Start bot and catch launch errors
 // Handle process termination signals
 process.once('SIGINT', () => bot.stop('SIGINT')); // Stop bot on interrupt signal
 process.once('SIGTERM', () => bot.stop('SIGTERM')); // Stop bot on termination signal
+
+// Webhook setup
+const app = express();
+app.use(express.json()); // Parse incoming JSON requests
+
+const PORT = process.env.PORT || 3000;
+const WEBHOOK_PATH = `/webhook/${process.env.TELEGRAM_BOT_TOKEN}`;
+const WEBHOOK_URL = `${process.env.RENDER_EXTERNAL_URL}${WEBHOOK_PATH}`;
+
+// Set webhook
+bot.telegram.setWebhook(WEBHOOK_URL).then(() => {
+    console.log(`Webhook set to ${WEBHOOK_URL}`);
+}).catch(err => {
+    console.error('Failed to set webhook:', err);
+    process.exit(1);
+});
+
+// Handle webhook requests
+app.use(bot.webhookCallback(WEBHOOK_PATH));
+
+// Health check endpoint
+app.get('/', (req, res) => {
+    res.send('Bot is running!');
+});
+
+// Start Express server
+app.listen(PORT, () => {
+    console.log(`Server is running on port ${PORT}`);
+});
