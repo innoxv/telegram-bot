@@ -1,9 +1,8 @@
 // Import required modules for bot functionality, database interaction, password hashing, and environment variable management
-const { Telegraf, Scenes } = require('telegraf');
+const { Telegraf, session, Scenes } = require('telegraf');
 const express = require('express'); // Add Express for webhook handling
 const { Pool } = require('pg'); // Import PostgreSQL client
 const bcrypt = require('bcrypt'); // Library for secure password hash verification
-const RedisSession = require('telegraf-session-redis'); // Import Redis session middleware
 require('dotenv').config(); // Loads environment variables from .env file
 
 // Validate environment variables to ensure the Telegram bot token is set
@@ -14,14 +13,7 @@ if (!process.env.TELEGRAM_BOT_TOKEN) {
 
 // Initialize bot and database pool
 const bot = new Telegraf(process.env.TELEGRAM_BOT_TOKEN); // Create Telegraf bot instance with token from .env
-
-// Redis session setup for persistent storage
-const session = new RedisSession({
-    url: `redis://${process.env.REDIS_HOST}:${process.env.REDIS_PORT}`,
-    password: process.env.REDIS_PASSWORD,
-    tls: { rejectUnauthorized: false } // Adjust TLS for older versions
-});
-bot.use(session); // Enable session instance
+bot.use(session()); // Enable in-memory session middleware to store user data (userId, customerName)
 
 // Create PostgreSQL connection pool
 const pool = new Pool({
@@ -878,24 +870,23 @@ const PORT = process.env.PORT || 3000;
 const WEBHOOK_PATH = `/webhook/${process.env.TELEGRAM_BOT_TOKEN}`;
 const WEBHOOK_URL = `${process.env.RENDER_EXTERNAL_URL || 'http://localhost:3000'}${WEBHOOK_PATH}`;
 
-// Set webhook
-bot.telegram.setWebhook(WEBHOOK_URL).then(() => {
-    console.log(`Webhook set to ${WEBHOOK_URL}`);
-}).catch(err => {
-    console.error('Failed to set webhook:', err);
-    process.exit(1);
-});
-
-// Handle webhook requests
-app.use(bot.webhookCallback(WEBHOOK_PATH));
-
-// Add webhook error handling
-bot.on('webhook_error', async (error) => {
-    console.error('Webhook error:', error.message);
-    await bot.telegram.setWebhook(WEBHOOK_URL).catch(err => {
-        console.error('Failed to reset webhook:', err.message);
+// Set webhook explicitly
+bot.telegram.setWebhook(`${process.env.WEBHOOK_URL}`)
+    .then(() => {
+        console.log(`Webhook set to ${process.env.WEBHOOK_URL}`);
+    })
+    .catch(err => {
+        console.error('Failed to set webhook:', err);
+        process.exit(1);
     });
+
+// Start Express server to handle webhook requests
+app.post(`/webhook/${process.env.TELEGRAM_BOT_TOKEN}`, (req, res) => {
+    bot.handleUpdate(req.body, res);
 });
+
+// Start the bot without long polling
+console.log('Bot is running using webhooks');
 
 // Health check endpoint
 app.get('/', (req, res) => {
