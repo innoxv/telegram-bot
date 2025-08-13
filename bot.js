@@ -1,8 +1,9 @@
 // Import required modules for bot functionality, database interaction, password hashing, and environment variable management
-const { Telegraf, session, Scenes } = require('telegraf');
+const { Telegraf, Scenes } = require('telegraf');
 const express = require('express'); // Add Express for webhook handling
 const { Pool } = require('pg'); // Import PostgreSQL client
 const bcrypt = require('bcrypt'); // Library for secure password hash verification
+const RedisSession = require('telegraf-session-redis'); // Import Redis session middleware
 require('dotenv').config(); // Loads environment variables from .env file
 
 // Validate environment variables to ensure the Telegram bot token is set
@@ -13,7 +14,14 @@ if (!process.env.TELEGRAM_BOT_TOKEN) {
 
 // Initialize bot and database pool
 const bot = new Telegraf(process.env.TELEGRAM_BOT_TOKEN); // Create Telegraf bot instance with token from .env
-bot.use(session()); // Enable in-memory session middleware to store user data (userId, customerName)
+
+// Redis session setup for persistent storage
+const session = new RedisSession({
+    url: `redis://${process.env.REDIS_HOST}:${process.env.REDIS_PORT}`,
+    password: process.env.REDIS_PASSWORD,
+    tls: { rejectUnauthorized: false } // Adjust TLS for older versions
+});
+bot.use(session); // Enable session instance
 
 // Create PostgreSQL connection pool
 const pool = new Pool({
@@ -880,6 +888,14 @@ bot.telegram.setWebhook(WEBHOOK_URL).then(() => {
 
 // Handle webhook requests
 app.use(bot.webhookCallback(WEBHOOK_PATH));
+
+// Add webhook error handling
+bot.on('webhook_error', async (error) => {
+    console.error('Webhook error:', error.message);
+    await bot.telegram.setWebhook(WEBHOOK_URL).catch(err => {
+        console.error('Failed to reset webhook:', err.message);
+    });
+});
 
 // Health check endpoint
 app.get('/', (req, res) => {
