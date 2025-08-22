@@ -41,7 +41,7 @@ async function testSupabaseConnection() {
             if (tableError) {
                 console.warn(`Table ${table} not found or inaccessible:`, tableError.message);
             } else {
-                console.log(`Table ${table} found`);
+                // console.log(`Table ${table} found`); // uncomment to check tables existence on logs
             }
         }
     } catch (err) {
@@ -949,7 +949,7 @@ app.get('/ping-supabase', async (req, res) => {
             console.error('Supabase ping failed:', error.message);
             return res.status(500).json({ error: 'Supabase ping failed' });
         }
-        console.log('Supabase ping successful:', new Date());
+        // console.log('Supabase ping successful:', new Date());  // comment out to check consistency
         res.status(200).json({ message: 'Supabase ping successful', data });
     } catch (err) {
         console.error('Supabase ping error:', err.message);
