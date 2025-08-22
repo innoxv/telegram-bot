@@ -938,6 +938,25 @@ bot.telegram.setWebhook(WEBHOOK_URL)
         process.exit(1);
     });
 
+// New endpoint to ping Supabase and keep the database active
+app.get('/ping-supabase', async (req, res) => {
+    try {
+        const { data, error } = await supabase
+            .from('users') // Use a lightweight table like 'users'
+            .select('user_id')
+            .limit(1); // Minimize load with a single-row query
+        if (error) {
+            console.error('Supabase ping failed:', error.message);
+            return res.status(500).json({ error: 'Supabase ping failed' });
+        }
+        console.log('Supabase ping successful:', new Date());
+        res.status(200).json({ message: 'Supabase ping successful', data });
+    } catch (err) {
+        console.error('Supabase ping error:', err.message);
+        res.status(500).json({ error: 'Internal server error' });
+    }
+});
+
 // Start Express server to handle webhook requests
 app.post(WEBHOOK_PATH, (req, res) => {
     bot.handleUpdate(req.body, res);
