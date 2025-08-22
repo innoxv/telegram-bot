@@ -1,42 +1,55 @@
 // Import required modules for bot functionality, database interaction, password hashing, and environment variable management
 const { Telegraf, session, Scenes } = require('telegraf');
 const express = require('express'); // Add Express for webhook handling
-const { Pool } = require('pg'); // Import PostgreSQL client
+const { createClient } = require('@supabase/supabase-js'); // Import Supabase client
 const bcrypt = require('bcrypt'); // Library for secure password hash verification
 require('dotenv').config(); // Loads environment variables from .env file
 
-// Validate environment variables to ensure the Telegram bot token is set
-if (!process.env.TELEGRAM_BOT_TOKEN) {
-    console.error('Missing TELEGRAM_BOT_TOKEN'); // Log error if token is missing
-    process.exit(1); // Exit process with failure code
+// Validate environment variables to ensure the Telegram bot token and Supabase credentials are set
+const requiredEnvVars = [
+    'TELEGRAM_BOT_TOKEN',
+    'SUPABASE_URL',
+    'SUPABASE_KEY',
+    'RENDER_EXTERNAL_URL',
+    'WEBHOOK_URL'
+];
+for (const envVar of requiredEnvVars) {
+    if (!process.env[envVar]) {
+        console.error(`Missing ${envVar}`); // Log error if variable is missing
+        process.exit(1); // Exit process with failure code
+    }
 }
 
-// Initialize bot and database pool
+// Initialize bot and Supabase client
 const bot = new Telegraf(process.env.TELEGRAM_BOT_TOKEN); // Create Telegraf bot instance with token from .env
 bot.use(session()); // Enable in-memory session middleware to store user data (userId, customerName)
+const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY); // Initialize Supabase client
 
-// Create PostgreSQL connection pool
-const pool = new Pool({
-    user: process.env.DB_USER, // Database username from .env
-    host: process.env.DB_HOST, // Database host
-    database: process.env.DB_NAME, // Database name
-    password: process.env.DB_PASSWORD, // Database password
-    port: process.env.DB_PORT, // Database port
-    ssl: {
-        rejectUnauthorized: false // Allow self-signed certificates 
-    }
-});
-
-// Verify database connection to ensure the bot can access the database
-pool.connect()
-    .then(client => {
+// Verify Supabase connection to ensure the bot can access the database
+async function testSupabaseConnection() {
+    try {
+        const { data, error } = await supabase.from('users').select('user_id').limit(1);
+        if (error) {
+            console.error('Supabase connection failed:', error.message);
+            process.exit(1);
+        }
         console.log('Database connection successful');
-        client.release(); // Release the connection back to the pool
-    })
-    .catch(err => {
+        // Check for expected tables
+        const tables = ['users', 'customers', 'lenders', 'loans', 'payments', 'loan_offers', 'activity'];
+        for (const table of tables) {
+            const { error: tableError } = await supabase.from(table).select('*').limit(0);
+            if (tableError) {
+                console.warn(`Table ${table} not found or inaccessible:`, tableError.message);
+            } else {
+                console.log(`Table ${table} found`);
+            }
+        }
+    } catch (err) {
         console.error('Database connection failed:', err.message);
         process.exit(1); // Exit process with failure code
-    });
+    }
+}
+testSupabaseConnection();
 
 // Set bot commands in Telegram’s command menu for user interaction
 bot.telegram.setMyCommands([
@@ -62,12 +75,12 @@ async function checkAuth(ctx) {
         return false; // Return false to indicate unauthenticated state
     }
     if (!ctx.session.role) { // Ensure role is stored in session
-        const userRows = await pool.query('SELECT role FROM users WHERE user_id = $1', [ctx.session.userId]); // Query user role
-        if (userRows.rows.length === 0) {
+        const { data, error } = await supabase.from('users').select('role').eq('user_id', ctx.session.userId).single();
+        if (error || !data) {
             ctx.reply('User account not found. Please contact support.'); // Reply if user not found
             return false;
         }
-        ctx.session.role = typeof userRows.rows[0].role === 'string' ? userRows.rows[0].role.toLowerCase() : userRows.rows[0].role; // Store normalized role in session
+        ctx.session.role = typeof data.role === 'string' ? data.role.toLowerCase() : data.role; // Store normalized role in session
     }
     return true; // Return true if user is authenticated
 }
@@ -83,13 +96,13 @@ function restrictRole(ctx, allowedRoles) {
 
 // Helper function to retrieve customer or lender ID from database
 async function getCustomerId(userId) {
-    const customerRows = await pool.query('SELECT customer_id FROM customers WHERE user_id = $1', [userId]); // Query customers table
-    return customerRows.rows.length > 0 ? customerRows.rows[0].customer_id : null; // Return customer_id or null
+    const { data, error } = await supabase.from('customers').select('customer_id').eq('user_id', userId).single(); // Query customers table
+    return error || !data ? null : data.customer_id; // Return customer_id or null
 }
 
 async function getLenderId(userId) {
-    const lenderRows = await pool.query('SELECT lender_id FROM lenders WHERE user_id = $1', [userId]); // Query lenders table
-    return lenderRows.rows.length > 0 ? lenderRows.rows[0].lender_id : null; // Return lender_id or null
+    const { data, error } = await supabase.from('lenders').select('lender_id').eq('user_id', userId).single(); // Query lenders table
+    return error || !data ? null : data.lender_id; // Return lender_id or null
 }
 
 // Sign-in Wizard Scene for multi-step authentication
@@ -113,13 +126,13 @@ const signInScene = new Scenes.WizardScene(
         }
 
         try {
-            const userRows = await pool.query('SELECT user_id, password, role FROM users WHERE email = $1', [email]); // Query users table for email
-            if (userRows.rows.length === 0) { // Check if user exists
+            const { data, error } = await supabase.from('users').select('user_id, password, role').eq('email', email).single(); // Query users table for email
+            if (error || !data) { // Check if user exists
                 await ctx.reply('Email not found. Contact support.'); // Reply if no user found
                 return ctx.scene.leave(); // Exit scene
             }
 
-            const hashedPassword = userRows.rows[0].password; // Get hashed password
+            const hashedPassword = data.password; // Get hashed password
             if (!hashedPassword?.startsWith('$2')) { // Validate hash format
                 await ctx.reply('System error. Contact support.'); // Reply if hash is invalid
                 return ctx.scene.leave(); // Exit scene
@@ -128,9 +141,9 @@ const signInScene = new Scenes.WizardScene(
             ctx.session = ctx.session || {}; // Initialize session if undefined
             ctx.session.signInData = { // Store temporary sign-in data
                 email,
-                userId: userRows.rows[0].user_id,
+                userId: data.user_id,
                 hashedPassword,
-                role: typeof userRows.rows[0].role === 'string' ? userRows.rows[0].role.toLowerCase() : userRows.rows[0].role // Store normalized role
+                role: typeof data.role === 'string' ? data.role.toLowerCase() : data.role // Store normalized role
             };
 
             await ctx.reply('Please enter your password:', { reply_markup: { force_reply: true } }); // Prompt for password
@@ -188,34 +201,34 @@ const signInScene = new Scenes.WizardScene(
             // Determine user type and fetch corresponding ID
             let customerId = null, lenderId = null;
             if (role === 'customer') {
-                const customerRows = await pool.query('SELECT customer_id, name FROM customers WHERE user_id = $1', [userId]);
-                if (customerRows.rows.length === 0) {
+                const { data, error } = await supabase.from('customers').select('customer_id, name').eq('user_id', userId).single();
+                if (error || !data) {
                     await ctx.reply('Account not found. Contact support.');
                     delete ctx.session?.signInData;
                     await ctx.scene.leave();
                     return;
                 }
-                customerId = customerRows.rows[0].customer_id;
-                ctx.session.customerName = customerRows.rows[0].name;
+                customerId = data.customer_id;
+                ctx.session.customerName = data.name;
             } else if (role === 'lender') {
-                const lenderRows = await pool.query('SELECT lender_id, name FROM lenders WHERE user_id = $1', [userId]);
-                if (lenderRows.rows.length === 0) {
+                const { data, error } = await supabase.from('lenders').select('lender_id, name').eq('user_id', userId).single();
+                if (error || !data) {
                     await ctx.reply('Account not found. Contact support.');
                     delete ctx.session?.signInData;
                     await ctx.scene.leave();
                     return;
                 }
-                lenderId = lenderRows.rows[0].lender_id;
-                ctx.session.customerName = lenderRows.rows[0].name;
+                lenderId = data.lender_id;
+                ctx.session.customerName = data.name;
             } else if (role === 'admin') {
-                const adminRows = await pool.query('SELECT user_name FROM users WHERE user_id = $1', [userId]);
-                if (adminRows.rows.length === 0) {
+                const { data, error } = await supabase.from('users').select('user_name').eq('user_id', userId).single();
+                if (error || !data) {
                     await ctx.reply('Admin account not found. Contact support.');
                     delete ctx.session?.signInData;
                     await ctx.scene.leave();
                     return;
                 }
-                ctx.session.customerName = adminRows.rows[0].user_name; // Set admin's name
+                ctx.session.customerName = data.user_name; // Set admin's name
             } else {
                 await ctx.reply('Invalid user role. Contact support.');
                 delete ctx.session?.signInData;
@@ -338,24 +351,34 @@ bot.command('balance', async (ctx) => {
             return ctx.reply('No customer account linked. Please contact support.'); // Reply if no customer found
         }
 
-        // Query to calculate total remaining balance for disbursed loans
-        const balanceRows = await pool.query(
-            `SELECT COALESCE(SUM(latest_payment.remaining_balance), 0) as outstanding_balance
-             FROM loans
-             JOIN (
-                 SELECT loan_id, remaining_balance
-                 FROM payments
-                 WHERE (loan_id, payment_date) IN (
-                     SELECT loan_id, MAX(payment_date)
-                     FROM payments
-                     GROUP BY loan_id
-                 )
-             ) latest_payment ON loans.loan_id = latest_payment.loan_id
-             WHERE loans.customer_id = $1 AND loans.status = 'disbursed'`,
-            [customerId]
-        );
+        // Query payments to get the latest remaining balance for each loan
+        const { data: payments, error: paymentError } = await supabase
+            .from('payments')
+            .select('loan_id, remaining_balance, payment_date')
+            .order('payment_date', { ascending: false });
 
-        const outstandingBalance = parseFloat(balanceRows.rows[0].outstanding_balance) || 0; // Extract balance, default to 0 if null
+        if (paymentError) throw paymentError;
+
+        const latestPayments = {};
+        payments.forEach(payment => {
+            if (!latestPayments[payment.loan_id]) {
+                latestPayments[payment.loan_id] = payment.remaining_balance || 0;
+            }
+        });
+
+        // Query disbursed loans for the customer
+        const { data: loans, error: loanError } = await supabase
+            .from('loans')
+            .select('loan_id')
+            .eq('customer_id', customerId)
+            .eq('status', 'disbursed');
+
+        if (loanError) throw loanError;
+
+        const outstandingBalance = loans.reduce((sum, loan) => {
+            return sum + (latestPayments[loan.loan_id] || 0);
+        }, 0);
+
         await ctx.reply(`Your outstanding loan balance: ${outstandingBalance.toFixed(2)}`); // Reply with formatted balance
     } catch (err) {
         console.error('Balance error:', err); // Log error for debugging
@@ -375,17 +398,20 @@ bot.command('loans', async (ctx) => {
         }
 
         // Query all loans for the customer, ordered by application date
-        const loans = await pool.query(
-            'SELECT loan_id, amount, status, due_date FROM loans WHERE customer_id = $1 ORDER BY application_date DESC',
-            [customerId]
-        );
+        const { data: loans, error } = await supabase
+            .from('loans')
+            .select('loan_id, amount, status, due_date, application_date')
+            .eq('customer_id', customerId)
+            .order('application_date', { ascending: false });
 
-        if (loans.rows.length === 0) { // Check if any loans exist
+        if (error) throw error;
+
+        if (loans.length === 0) { // Check if any loans exist
             return ctx.reply('No loans found.'); // Reply if no loans found
         }
 
         // Format loan data into a readable string
-        const response = loans.rows.map(loan => 
+        const response = loans.map(loan => 
             `ID: ${loan.loan_id}\nAmount: ${loan.amount}\nStatus: ${loan.status}\nDue: ${loan.due_date || 'N/A'}`
         ).join('\n\n');
 
@@ -406,42 +432,35 @@ bot.command('active_loans', async (ctx) => {
             return ctx.reply('No lender account linked. Please contact support.');
         }
         // Query active (disbursed) loans for this lender, joining loan_offers and aggregating payments
-        const loans = await pool.query(`
-            SELECT 
-                loans.loan_id,
-                loan_offers.loan_type,
-                loans.amount,
-                loans.interest_rate,
-                loans.duration,
-                loans.installments,
-                loans.due_date,
-                loans.status AS loan_status,
-                loans.application_date,
-                COALESCE(SUM(payments.amount), 0) AS amount_paid,
-                COALESCE(
-                    (SELECT p1.installment_balance
-                     FROM payments p1
-                     WHERE p1.loan_id = loans.loan_id
-                       AND (p1.installment_balance IS NOT NULL OR p1.remaining_balance IS NOT NULL)
-                     ORDER BY p1.payment_date DESC
-                     LIMIT 1),
-                    loans.installments
-                ) AS latest_installment_balance
-            FROM loans
-            JOIN loan_offers ON loans.offer_id = loan_offers.offer_id
-            LEFT JOIN payments ON loans.loan_id = payments.loan_id
-            WHERE loans.lender_id = $1
-              AND loans.status = 'disbursed'
-            GROUP BY loans.loan_id, loan_offers.loan_type, loans.amount, loans.interest_rate, loans.duration, loans.installments, loans.due_date, loans.status, loans.application_date
-            ORDER BY loans.application_date DESC
-        `, [lenderId]);
-        if (loans.rows.length === 0) {
+        const { data: loans, error: loanError } = await supabase
+            .from('loans')
+            .select(`
+                loan_id,
+                amount,
+                interest_rate,
+                duration,
+                installments,
+                due_date,
+                status,
+                application_date,
+                loan_offers:offer_id (loan_type),
+                payments (amount, payment_date, installment_balance)
+            `)
+            .eq('lender_id', lenderId)
+            .eq('status', 'disbursed')
+            .order('application_date', { ascending: false });
+
+        if (loanError) throw loanError;
+        if (loans.length === 0) {
             return ctx.reply('No active loans found.');
         }
         // Format loan data
-        const response = loans.rows.map(loan =>
-            `ID: ${loan.loan_id}\nType: ${loan.loan_type}\nAmount: ${loan.amount}\nInterest: ${loan.interest_rate}%\nDuration: ${loan.duration}\nInstallments: ${loan.installments}\nDue: ${loan.due_date || 'N/A'}\nStatus: ${loan.loan_status}\nApplied: ${loan.application_date}\nPaid: ${loan.amount_paid}\nLatest Installment/Remaining Balance: ${loan.latest_installment_balance}`
-        ).join('\n\n');
+        const response = loans.map(loan => {
+            const amountPaid = loan.payments.reduce((sum, p) => sum + (p.amount || 0), 0);
+            const latestPayment = loan.payments.sort((a, b) => new Date(b.payment_date) - new Date(a.payment_date))[0];
+            const latestBalance = latestPayment ? (latestPayment.installment_balance || loan.installments) : loan.installments;
+            return `ID: ${loan.loan_id}\nType: ${loan.loan_offers.loan_type}\nAmount: ${loan.amount}\nInterest: ${loan.interest_rate}%\nDuration: ${loan.duration}\nInstallments: ${loan.installments}\nDue: ${loan.due_date || 'N/A'}\nStatus: ${loan.status}\nApplied: ${loan.application_date}\nPaid: ${amountPaid}\nLatest Installment/Remaining Balance: ${latestBalance}`;
+        }).join('\n\n');
         await ctx.reply(`Active loans:\n\n${response}`);
     } catch (err) {
         console.error('Active loans error:', err);
@@ -461,17 +480,20 @@ bot.command('loan_history', async (ctx) => {
         }
 
         // Query all loans for the lender, ordered by application date
-        const loans = await pool.query(
-            'SELECT loan_id, amount, status, due_date FROM loans WHERE lender_id = $1 ORDER BY application_date DESC',
-            [lenderId]
-        );
+        const { data: loans, error } = await supabase
+            .from('loans')
+            .select('loan_id, amount, status, due_date, application_date')
+            .eq('lender_id', lenderId)
+            .order('application_date', { ascending: false });
 
-        if (loans.rows.length === 0) { // Check if any loans exist
+        if (error) throw error;
+
+        if (loans.length === 0) { // Check if any loans exist
             return ctx.reply('No loans found.'); // Reply if no loans found
         }
 
         // Format loan data into a readable string
-        const response = loans.rows.map(loan => 
+        const response = loans.map(loan => 
             `ID: ${loan.loan_id}\nAmount: ${loan.amount}\nStatus: ${loan.status}\nDue: ${loan.due_date || 'N/A'}`
         ).join('\n\n');
 
@@ -525,23 +547,24 @@ bot.on('message', async (ctx) => {
             }
 
             // Query loan details for the specified loan ID and customer
-            const loans = await pool.query(
-                'SELECT amount, interest_rate, status, due_date, application_date FROM loans WHERE loan_id = $1 AND customer_id = $2',
-                [loanId, customerId]
-            );
+            const { data, error } = await supabase
+                .from('loans')
+                .select('amount, interest_rate, status, due_date, application_date')
+                .eq('loan_id', loanId)
+                .eq('customer_id', customerId)
+                .single();
 
-            if (loans.rows.length === 0) { // Check if loan exists
+            if (error || !data) { // Check if loan exists
                 return ctx.reply('Loan not found or access denied.', { reply_markup: { remove_keyboard: true } }); // Reply if no loan found
             }
 
-            const loan = loans.rows[0]; // Get loan data
             await ctx.reply([ // Reply with formatted loan details
                 `Loan ID: ${loanId}`,
-                `Amount: ${loan.amount}`,
-                `Interest Rate: ${loan.interest_rate}%`,
-                `Status: ${loan.status}`,
-                `Due Date: ${loan.due_date || 'N/A'}`,
-                `Applied: ${loan.application_date}`
+                `Amount: ${data.amount}`,
+                `Interest Rate: ${data.interest_rate}%`,
+                `Status: ${data.status}`,
+                `Due Date: ${data.due_date || 'N/A'}`,
+                `Applied: ${data.application_date}`
             ].join('\n'), { reply_markup: { remove_keyboard: true } });
         } catch (err) {
             console.error('Loan check error:', err); // Log error
@@ -563,26 +586,31 @@ bot.on('message', async (ctx) => {
             }
 
             // Verify loan belongs to lender
-            const loanRows = await pool.query(
-                'SELECT loan_id FROM loans WHERE loan_id = $1 AND lender_id = $2',
-                [loanId, lenderId]
-            );
-            if (loanRows.rows.length === 0) { // Check if loan exists
+            const { data: loan, error: loanError } = await supabase
+                .from('loans')
+                .select('loan_id')
+                .eq('loan_id', loanId)
+                .eq('lender_id', lenderId)
+                .single();
+            if (loanError || !loan) { // Check if loan exists
                 return ctx.reply('Loan not found or access denied.', { reply_markup: { remove_keyboard: true } }); // Reply if no loan
             }
 
             // Query payment history for the loan
-            const payments = await pool.query(
-                'SELECT payment_id, amount, payment_method, payment_date FROM payments WHERE loan_id = $1 ORDER BY payment_date DESC',
-                [loanId]
-            );
+            const { data: payments, error } = await supabase
+                .from('payments')
+                .select('payment_id, amount, payment_method, payment_date')
+                .eq('loan_id', loanId)
+                .order('payment_date', { ascending: false });
 
-            if (payments.rows.length === 0) { // Check if any payments exist
+            if (error) throw error;
+
+            if (payments.length === 0) { // Check if any payments exist
                 return ctx.reply('No payments found for this loan.', { reply_markup: { remove_keyboard: true } }); // Reply if no payments
             }
 
             // Format payment data
-            const response = payments.rows.map(payment =>
+            const response = payments.map(payment =>
                 `Payment ID: ${payment.payment_id}\nAmount: ${payment.amount}\nMethod: ${payment.payment_method}\nDate: ${payment.payment_date}`
             ).join('\n\n');
 
@@ -607,17 +635,21 @@ bot.on('message', async (ctx) => {
 
         try {
             // Query users by role
-            const users = await pool.query(
-                'SELECT user_id, user_name, email FROM users WHERE role = $1 ORDER BY user_id LIMIT 50',
-                [formattedRole]
-            );
+            const { data: users, error } = await supabase
+                .from('users')
+                .select('user_id, user_name, email')
+                .eq('role', formattedRole)
+                .order('user_id')
+                .limit(50);
 
-            if (users.rows.length === 0) {
+            if (error) throw error;
+
+            if (users.length === 0) {
                 return ctx.reply(`No users found for role ${formattedRole}.`, { reply_markup: { remove_keyboard: true } });
             }
 
             // Format user data
-            const response = users.rows.map(user =>
+            const response = users.map(user =>
                 `ID: ${user.user_id}\nName: ${user.user_name}\nEmail: ${user.email}`
             ).join('\n\n');
 
@@ -638,30 +670,35 @@ bot.on('message', async (ctx) => {
         }
 
         try {
-            let timeFilter;
+            let range;
             if (period === 'today') {
-                timeFilter = 'DATE(activity_time) = CURRENT_DATE'; // Filter for today
+                range = { gte: new Date().toISOString().split('T')[0] };
             } else if (period === 'this week') {
-                timeFilter = 'activity_time >= CURRENT_DATE - INTERVAL \'7 days\''; // Filter for last 7 days
+                const weekAgo = new Date();
+                weekAgo.setDate(weekAgo.getDate() - 7);
+                range = { gte: weekAgo.toISOString() };
             } else {
-                timeFilter = 'activity_time >= CURRENT_DATE - INTERVAL \'1 month\''; // Filter for last 30 days
+                const monthAgo = new Date();
+                monthAgo.setMonth(monthAgo.getMonth() - 1);
+                range = { gte: monthAgo.toISOString() };
             }
 
             // Query activity logs with time filter, limited to 10
-            const logs = await pool.query(
-                `SELECT log_id, user_id, activity, activity_time, activity_type 
-                 FROM activity 
-                 WHERE ${timeFilter} 
-                 ORDER BY activity_time DESC 
-                 LIMIT 10`
-            );
+            const { data: logs, error } = await supabase
+                .from('activity')
+                .select('log_id, user_id, activity, activity_time, activity_type')
+                .gte('activity_time', range.gte)
+                .order('activity_time', { ascending: false })
+                .limit(10);
 
-            if (logs.rows.length === 0) { // Check if any logs exist
+            if (error) throw error;
+
+            if (logs.length === 0) { // Check if any logs exist
                 return ctx.reply(`No activity logs found for ${period}.`, { reply_markup: { remove_keyboard: true } }); // Reply if no logs
             }
 
             // Format log data
-            const response = logs.rows.map(log =>
+            const response = logs.map(log =>
                 `Log ID: ${log.log_id}\nUser ID: ${log.user_id}\nActivity: ${log.activity}\nType: ${log.activity_type}\nTime: ${log.activity_time}`
             ).join('\n\n');
 
@@ -715,25 +752,33 @@ bot.on('callback_query', async (ctx) => {
                 await ctx.answerCbQuery('No customer account linked'); // Notify via callback
                 return;
             }
-            // Query total remaining balance for disbursed loans
-            const balanceRows = await pool.query(
-                `SELECT COALESCE(SUM(latest_payment.remaining_balance), 0) as outstanding_balance
-                 FROM loans
-                 JOIN (
-                     SELECT loan_id, remaining_balance
-                     FROM payments
-                     WHERE (loan_id, payment_date) IN (
-                         SELECT loan_id, MAX(payment_date)
-                         FROM payments
-                         GROUP BY loan_id
-                     )
-                 ) latest_payment ON loans.loan_id = latest_payment.loan_id
-                 WHERE loans.customer_id = $1 AND loans.status = 'disbursed'`,
-                [customerId]
-            );
+            // Query payments and loans to calculate total remaining balance
+            const { data: payments, error: paymentError } = await supabase
+                .from('payments')
+                .select('loan_id, remaining_balance, payment_date')
+                .order('payment_date', { ascending: false });
 
-            const outstandingBalance = parseFloat(balanceRows.rows[0].outstanding_balance) || 0; // Extract balance, default to 0
-            
+            if (paymentError) throw paymentError;
+
+            const latestPayments = {};
+            payments.forEach(payment => {
+                if (!latestPayments[payment.loan_id]) {
+                    latestPayments[payment.loan_id] = payment.remaining_balance || 0;
+                }
+            });
+
+            const { data: loans, error: loanError } = await supabase
+                .from('loans')
+                .select('loan_id')
+                .eq('customer_id', customerId)
+                .eq('status', 'disbursed');
+
+            if (loanError) throw loanError;
+
+            const outstandingBalance = loans.reduce((sum, loan) => {
+                return sum + (latestPayments[loan.loan_id] || 0);
+            }, 0);
+
             await ctx.answerCbQuery(); // Acknowledge callback
             await ctx.reply(`Your outstanding loan balance: ${outstandingBalance.toFixed(2)}`); // Reply with balance
         }
@@ -743,16 +788,20 @@ bot.on('callback_query', async (ctx) => {
                 return;
             }
             // Query loans with limit to prevent large responses
-            const loans = await pool.query(
-                'SELECT loan_id, amount, status FROM loans WHERE customer_id = $1 ORDER BY application_date DESC LIMIT 10',
-                [customerId]
-            );
+            const { data: loans, error } = await supabase
+                .from('loans')
+                .select('loan_id, amount, status')
+                .eq('customer_id', customerId)
+                .order('application_date', { ascending: false })
+                .limit(10);
+
+            if (error) throw error;
 
             await ctx.answerCbQuery(); // Acknowledge callback
-            if (loans.rows.length === 0) { // Check if any loans exist
+            if (loans.length === 0) { // Check if any loans exist
                 await ctx.reply('No loans found.'); // Reply if no loans
             } else {
-                const response = loans.rows.map(loan => // Format loan data
+                const response = loans.map(loan => // Format loan data
                     `ID: ${loan.loan_id} | Amount: ${loan.amount} | Status: ${loan.status}`
                 ).join('\n');
                 await ctx.reply(`Your loans:\n\n${response}`); // Reply with loan list
@@ -764,16 +813,21 @@ bot.on('callback_query', async (ctx) => {
                 return;
             }
             // Query disbursed loans for the lender
-            const loans = await pool.query(
-                'SELECT loan_id, amount, status FROM loans WHERE lender_id = $1 AND status = \'disbursed\' ORDER BY application_date DESC LIMIT 10',
-                [lenderId]
-            );
+            const { data: loans, error } = await supabase
+                .from('loans')
+                .select('loan_id, amount, status')
+                .eq('lender_id', lenderId)
+                .eq('status', 'disbursed')
+                .order('application_date', { ascending: false })
+                .limit(10);
+
+            if (error) throw error;
 
             await ctx.answerCbQuery(); // Acknowledge callback
-            if (loans.rows.length === 0) { // Check if any loans exist
+            if (loans.length === 0) { // Check if any loans exist
                 await ctx.reply('No active loans found.'); // Reply if no loans
             } else {
-                const response = loans.rows.map(loan => // Format loan data
+                const response = loans.map(loan => // Format loan data
                     `ID: ${loan.loan_id} | Amount: ${loan.amount} | Status: ${loan.status}`
                 ).join('\n');
                 await ctx.reply(`Active loans:\n\n${response}`); // Reply with loan list
@@ -785,16 +839,20 @@ bot.on('callback_query', async (ctx) => {
                 return;
             }
             // Query all loans for the lender
-            const loans = await pool.query(
-                'SELECT loan_id, amount, status FROM loans WHERE lender_id = $1 ORDER BY application_date DESC LIMIT 10',
-                [lenderId]
-            );
+            const { data: loans, error } = await supabase
+                .from('loans')
+                .select('loan_id, amount, status')
+                .eq('lender_id', lenderId)
+                .order('application_date', { ascending: false })
+                .limit(10);
+
+            if (error) throw error;
 
             await ctx.answerCbQuery(); // Acknowledge callback
-            if (loans.rows.length === 0) { // Check if any loans exist
+            if (loans.length === 0) { // Check if any loans exist
                 await ctx.reply('No loans found.'); // Reply if no loans
             } else {
-                const response = loans.rows.map(loan => // Format loan data
+                const response = loans.map(loan => // Format loan data
                     `ID: ${loan.loan_id} | Amount: ${loan.amount} | Status: ${loan.status}`
                 ).join('\n');
                 await ctx.reply(`Loan history:\n\n${response}`); // Reply with loan list
@@ -868,12 +926,12 @@ app.use(express.json()); // Parse incoming JSON requests
 
 const PORT = process.env.PORT || 3000;
 const WEBHOOK_PATH = `/webhook/${process.env.TELEGRAM_BOT_TOKEN}`;
-const WEBHOOK_URL = `${process.env.RENDER_EXTERNAL_URL || 'http://localhost:3000'}${WEBHOOK_PATH}`;
+const WEBHOOK_URL = process.env.WEBHOOK_URL;
 
 // Set webhook explicitly
-bot.telegram.setWebhook(`${process.env.WEBHOOK_URL}`)
+bot.telegram.setWebhook(WEBHOOK_URL)
     .then(() => {
-        console.log(`Webhook set to ${process.env.WEBHOOK_URL}`);
+        console.log(`Webhook set to ${WEBHOOK_URL}`);
     })
     .catch(err => {
         console.error('Failed to set webhook:', err);
@@ -881,7 +939,7 @@ bot.telegram.setWebhook(`${process.env.WEBHOOK_URL}`)
     });
 
 // Start Express server to handle webhook requests
-app.post(`/webhook/${process.env.TELEGRAM_BOT_TOKEN}`, (req, res) => {
+app.post(WEBHOOK_PATH, (req, res) => {
     bot.handleUpdate(req.body, res);
 });
 
